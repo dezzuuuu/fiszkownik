@@ -300,73 +300,228 @@ function cleanVocabTerm(str) {
     .trim();
 }
 
+function scoreLanguageSide(text, defaultDir) {
+  const s = String(text || '').trim();
+  if (!s) return { deScore: 0, plScore: 0, side: defaultDir === 'pl-de' ? 'pl' : 'de' };
+  let deScore = 0;
+  let plScore = 0;
+
+  if (/[äöüÄÖÜß]/.test(s)) deScore += 4;
+  if (/[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]/.test(s)) plScore += 4;
+
+  const deWords = /^(?:der|die|das|den|dem|des|ein|eine|einen|einem|einer|ich|du|er|sie|es|wir|ihr|mein|meine|dein|deine|sein|seine|nicht|und|oder|mit|auf|in|an|zu|für|von|aus|bei|nach|über|unter|haben|sein|werden|können|müssen|wollen|sollen|dürfen|möchten|machen|gehen|kommen|sehen|sagen|geben|nehmen|fahren|sprechen|lesen|schreiben|lernen|arbeiten|spielen|kaufen|essen|trinken|schlafen|wohnen|heißen|sich|etw\.|jdn\.|jdm\.)$/i;
+  const plWords = /^(?:ja|ty|on|ona|ono|my|wy|oni|one|mój|moja|moje|twój|twoja|twoje|jego|jej|ich|nasz|nasza|wasz|nie|i|oraz|albo|lub|z|ze|w|we|na|do|od|dla|po|przy|nad|pod|przed|za|mieć|być|zostać|móc|musieć|chcieć|robić|zrobić|iść|jechać|przyjść|widzieć|zobaczyć|mówić|powiedzieć|dać|dawać|wziąć|brać|czytać|pisać|uczyć|się|pracować|grać|kupić|jeść|pić|spać|mieszkać|nazywać|coś|kogoś|komuś)$/i;
+
+  const tokens = s.split(/[^a-zA-ZäöüÄÖÜßąćęłńóśźżĄĆĘŁŃÓŚŹŻ.]+/).filter(Boolean);
+  for (const tok of tokens) {
+    if (deWords.test(tok)) deScore += 2;
+    if (plWords.test(tok)) plScore += 2;
+  }
+
+  if (deScore > plScore) return { deScore, plScore, side: 'de' };
+  if (plScore > deScore) return { deScore, plScore, side: 'pl' };
+  return { deScore, plScore, side: defaultDir === 'pl-de' ? 'pl' : 'de' };
+}
+
+function classifyPhraseSide(text, defaultDir) {
+  const s = cleanVocabTerm(text);
+  if (!s) return null;
+  const hasDe = /[äöüÄÖÜß]/.test(s) || /(?:^|\s)(?:der|die|das|den|dem|des|ein|eine|einen|einem|einer|sich|etw\.|jdn\.|jdm\.)(?:\s|$)/i.test(s);
+  const hasPl = /[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]/.test(s) || /(?:^|\s)(?:się|nie|który|która|które|jest|są|mój|moja|moje|twój|twoja|twoje)(?:\s|$)/i.test(s);
+  if (hasDe && !hasPl) return 'de';
+  if (hasPl && !hasDe) return 'pl';
+  const sc = scoreLanguageSide(s, defaultDir);
+  return sc.side;
+}
+
 function splitBilingualLine(line, defaultDir) {
   const raw = String(line || '').trim();
   if (!raw) return null;
 
-  // 1. Wyraźny separator między słowem a tłumaczeniem (myślnik, półpauza, pauza, dwukropek, znak równości, strzałka, tabulator, pionowa kreska)
-  const sepMatch = raw.match(/^(.+?)\s*(?:\t|\s*[-–—=:→]\s*|\s*->\s*|\s*\|\s*)\s*(.+)$/);
-  if (sepMatch) {
-    const left = cleanVocabTerm(sepMatch[1]);
-    const right = cleanVocabTerm(sepMatch[2]);
+  // 1. Podział po wszystkich separatorach między kolumnami/członami (np. "der Lehrling - die Lehrlinge - uczeń", "der Rabatt - die Rabatte - rabat, zniżka")
+  const parts = raw
+    .split(/(?:\t|\s+[-–—=:→]\s+|\s*->\s*|\s*\|\s*)/)
+    .map(p => cleanVocabTerm(p))
+    .filter(Boolean);
+
+  if (parts.length >= 2) {
+    // Jeżeli są 3 lub więcej części (np. liczba pojedyncza DE - liczba mnoga DE - tłumaczenie PL),
+    // łączymy wszystkie części niemieckie po lewej, a wszystkie polskie po prawej!
+    const deParts = [];
+    const plParts = [];
+    for (let idx = 0; idx < parts.length; idx++) {
+      const part = parts[idx];
+      let side = classifyPhraseSide(part, defaultDir);
+      // Jeśli pierwsza część jest po niemiecku (np. "der Rabatt"), a druga zaczyna się od rodzajnika/słowa DE ("die Rabatte"),
+      // to obie należą do pola Niemiecki, natomiast ostatnia część bez rodzajnika DE trafia do Polskiego.
+      if (parts.length >= 3 && idx === parts.length - 1 && deParts.length >= 1 && !plParts.length) {
+        const looksStronglyDe = /[äöüÄÖÜß]/.test(part) || /^(?:der|die|das|den|dem|des|ein|eine|sich|etw\.|jdn\.|jdm\.)(?:\s|$)/i.test(part);
+        if (!looksStronglyDe) side = 'pl';
+      }
+      if (side === 'pl') plParts.push(part);
+      else deParts.push(part);
+    }
+
+    if (deParts.length && plParts.length) {
+      return {
+        de: deParts.join(' – '),
+        pl: plParts.join(' – '),
+        bilingual: true
+      };
+    }
+
+    const left = parts[0];
+    const right = parts.slice(1).join(' – ');
     if (left && right) {
+      const leftSide = classifyPhraseSide(left, defaultDir);
+      const rightSide = classifyPhraseSide(right, defaultDir);
+      if (leftSide === 'de' && rightSide === 'pl') return { de: left, pl: right, bilingual: true };
+      if (leftSide === 'pl' && rightSide === 'de') return { de: right, pl: left, bilingual: true };
       if (defaultDir === 'pl-de') return { de: right, pl: left, bilingual: true };
       return { de: left, pl: right, bilingual: true };
     }
   }
 
-  // 2. Zapis z nawiasem na końcu, np. "der Apfel (jabłko)" lub "jabłko (der Apfel)"
+  // 2. Zapis z nawiasem na końcu, np. "der Apfel (jabłko)" lub "Ich lerne Deutsch (Uczę się niemieckiego)"
   const parenMatch = raw.match(/^([^(]+?)\s*\(([^)]+)\)\s*$/);
   if (parenMatch) {
     const outPart = cleanVocabTerm(parenMatch[1]);
     const inPart = cleanVocabTerm(parenMatch[2]);
     if (outPart && inPart && /[a-zA-ZäöüÄÖÜßąćęłńóśźżĄĆĘŁŃÓŚŹŻ]{2,}/.test(inPart)) {
+      const outSide = classifyPhraseSide(outPart, defaultDir);
+      const inSide = classifyPhraseSide(inPart, defaultDir);
+      if (outSide === 'de' && inSide === 'pl') return { de: outPart, pl: inPart, bilingual: true };
+      if (outSide === 'pl' && inSide === 'de') return { de: inPart, pl: outPart, bilingual: true };
       if (defaultDir === 'pl-de') return { de: inPart, pl: outPart, bilingual: true };
       return { de: outPart, pl: inPart, bilingual: true };
     }
   }
 
-  // 3. Brak separatora, ale w jednej linii występują dwie kolumny oddzielone większym odstępem
-  const hasPlDiacritics = /[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]/;
-  const hasDeMarker = /(?:^|\s)(?:der|die|das|ein|eine|sich|etw\.|jdn\.|jdm\.)(?:\s|$)|[äöüÄÖÜß]/i;
+  // 3. Brak separatora, ale w jednej linii występują dwie kolumny oddzielone większym odstępem (np. wielowyrazowe zwroty lub zdania obok siebie)
   const multiSpace = raw.split(/\s{2,}/).map(x => cleanVocabTerm(x)).filter(Boolean);
   if (multiSpace.length === 2) {
     const [a, b] = multiSpace;
-    if (hasPlDiacritics.test(b) && !hasPlDiacritics.test(a)) return { de: a, pl: b, bilingual: true };
-    if (hasPlDiacritics.test(a) && !hasPlDiacritics.test(b)) return { de: b, pl: a, bilingual: true };
-    if (hasDeMarker.test(a) && !hasDeMarker.test(b)) return { de: a, pl: b, bilingual: true };
-    if (hasDeMarker.test(b) && !hasDeMarker.test(a)) return { de: b, pl: a, bilingual: true };
+    const sideA = classifyPhraseSide(a, defaultDir);
+    const sideB = classifyPhraseSide(b, defaultDir);
+    if (sideA === 'de' && sideB === 'pl') return { de: a, pl: b, bilingual: true };
+    if (sideA === 'pl' && sideB === 'de') return { de: b, pl: a, bilingual: true };
     return defaultDir === 'pl-de'
       ? { de: b, pl: a, bilingual: true }
       : { de: a, pl: b, bilingual: true };
   }
 
-  // 4. Pojedyncza linia bez separatora zawierająca jednocześnie wyrazy niemieckie i polskie (np. "der Apfel jabłko")
-  if (hasDeMarker.test(raw) && hasPlDiacritics.test(raw)) {
-    const tokens = raw.split(/\s+/);
-    let splitIdx = -1;
-    for (let i = 1; i < tokens.length; i++) {
-      const leftPart = tokens.slice(0, i).join(' ');
-      const rightPart = tokens.slice(i).join(' ');
-      if ((hasDeMarker.test(leftPart) && !hasPlDiacritics.test(leftPart) && hasPlDiacritics.test(rightPart)) ||
-          (hasPlDiacritics.test(leftPart) && !hasDeMarker.test(leftPart) && hasDeMarker.test(rightPart))) {
-        splitIdx = i;
-        break;
-      }
-    }
-    if (splitIdx > 0) {
-      const leftPart = cleanVocabTerm(tokens.slice(0, splitIdx).join(' '));
-      const rightPart = cleanVocabTerm(tokens.slice(splitIdx).join(' '));
-      if (leftPart && rightPart) {
-        if (hasPlDiacritics.test(leftPart) && !hasPlDiacritics.test(rightPart)) {
-          return { de: rightPart, pl: leftPart, bilingual: true };
+  // 4. Pojedyncza linia bez separatora zawierająca zarówno część niemiecką jak i polską (np. kilka słów lub zdanie + tłumaczenie)
+  const tokens = raw.split(/\s+/).filter(Boolean);
+  if (tokens.length >= 2) {
+    const hasAnyDe = /[äöüÄÖÜß]/.test(raw) || /(?:^|\s)(?:der|die|das|den|dem|des|ein|eine|einen|einem|einer|ich|du|er|sie|es|wir|ihr|mein|meine|dein|deine|sein|seine|nicht|und|oder|mit|auf|in|zu|für|von|aus|bei|nach|sich|etw\.|jdn\.|jdm\.)(?:\s|$)/i.test(raw);
+    const hasAnyPl = /[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]/.test(raw) || /(?:^|\s)(?:ja|ty|on|ona|ono|my|wy|oni|one|mój|moja|moje|twój|twoja|twoje|nie|i|oraz|w|we|na|do|od|dla|po|przy|się|jest|są)(?:\s|$)/i.test(raw);
+
+    if (hasAnyDe && hasAnyPl) {
+      let bestSplit = -1;
+      let bestScore = -999;
+
+      for (let i = 1; i < tokens.length; i++) {
+        const leftStr = cleanVocabTerm(tokens.slice(0, i).join(' '));
+        const rightStr = cleanVocabTerm(tokens.slice(i).join(' '));
+        if (!leftStr || !rightStr) continue;
+
+        const lScore = scoreLanguageSide(leftStr, defaultDir);
+        const rScore = scoreLanguageSide(rightStr, defaultDir);
+
+        let score = 0;
+        if (lScore.deScore > lScore.plScore && rScore.plScore > rScore.deScore) score += 10;
+        if (lScore.plScore > lScore.deScore && rScore.deScore > rScore.plScore) score += 10;
+
+        // Premia za równowagę liczby wyrazów gdy po obu stronach jest pełniejsze wyrażenie/zdanie (np. X wyrazów DE i X wyrazów PL)
+        const lenDiff = Math.abs(i - (tokens.length - i));
+        score -= lenDiff * 0.6;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestSplit = i;
         }
-        return { de: leftPart, pl: rightPart, bilingual: true };
+      }
+
+      if (bestSplit > 0 && bestScore > 0) {
+        const leftPart = cleanVocabTerm(tokens.slice(0, bestSplit).join(' '));
+        const rightPart = cleanVocabTerm(tokens.slice(bestSplit).join(' '));
+        if (leftPart && rightPart) {
+          const leftSide = classifyPhraseSide(leftPart, defaultDir);
+          if (leftSide === 'pl') return { de: rightPart, pl: leftPart, bilingual: true };
+          return { de: leftPart, pl: rightPart, bilingual: true };
+        }
       }
     }
   }
 
   return null;
+}
+
+function splitRecognizedLinesIntoItems(rawText, defaultDir) {
+  const lines = String(rawText || '').split(/\r?\n/).map(l => l.replace(/[ \t]+/g, ' ').trim()).filter(Boolean);
+  const items = [];
+
+  // Najpierw grupujemy sąsiednie linie w bloki tego samego języka (np. wielowierszowe zdanie niemieckie
+  // "Um 11 Uhr fange ich an, das Mittagessen" + "zu kochen." oraz osobny blok tłumaczenia po polsku).
+  const blocks = [];
+  for (const rawLine of lines) {
+    const pair = splitBilingualLine(rawLine, defaultDir);
+    if (pair) {
+      blocks.push({ kind: 'pair', de: pair.de, pl: pair.pl });
+      continue;
+    }
+
+    const cleaned = cleanVocabTerm(rawLine);
+    if (!cleaned) continue;
+
+    // Pomijamy same pojedyncze znaki wypunktowania / punktorów
+    if (/^[•·\-*–—]+$/.test(cleaned)) continue;
+
+    const side = classifyPhraseSide(cleaned, defaultDir);
+    const prev = blocks.length ? blocks[blocks.length - 1] : null;
+
+    // Jeśli poprzedni blok jest w tym samym języku (DE lub PL) i nie kończy się pełną kropką kończącą zdanie
+    // (lub zaczyna się małą literą / bezokolicznikiem typu "zu kochen"), łączymy w jeden ciąg!
+    const prevEndsSentence = prev && prev.kind === 'mono' && prev.side === side && /[.!?]$/.test(prev.rawLine);
+    const startsContinuation = /^[a-zäöüßąćęłńóśźż]/.test(cleaned) || /^zu\s+/i.test(cleaned);
+
+    if (prev && prev.kind === 'mono' && prev.side === side && (!prevEndsSentence || startsContinuation)) {
+      prev.rawLine = prev.rawLine + ' ' + cleaned;
+      prev.text = cleanVocabTerm(prev.text + ' ' + cleaned);
+    } else {
+      blocks.push({ kind: 'mono', side, text: cleaned, rawLine: cleaned });
+    }
+  }
+
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    if (b.kind === 'pair') {
+      items.push({ de: b.de, pl: b.pl, bilingual: true });
+      continue;
+    }
+
+    const next = i + 1 < blocks.length ? blocks[i + 1] : null;
+    if (next && next.kind === 'mono' && b.side && next.side && b.side !== next.side) {
+      if (b.side === 'de' && next.side === 'pl') {
+        items.push({ de: b.text, pl: next.text, bilingual: true });
+        i++;
+        continue;
+      }
+      if (b.side === 'pl' && next.side === 'de') {
+        items.push({ de: next.text, pl: b.text, bilingual: true });
+        i++;
+        continue;
+      }
+    }
+
+    items.push({
+      de: b.side === 'de' ? b.text : '',
+      pl: b.side === 'pl' ? b.text : '',
+      bilingual: false
+    });
+  }
+
+  return items;
 }
 
 async function recognizeAndParseCanvas(canvas, langHint, onProgress) {
@@ -375,19 +530,38 @@ async function recognizeAndParseCanvas(canvas, langHint, onProgress) {
   if (app.sample) {
     const blob = await new Promise((res, rej) => canvas.toBlob(b => b ? res(b) : rej(new Error('Blob error')), 'image/jpeg', 0.92));
     const r = await app.sample.json(
-      'Extract vocabulary items from the image accurately. ' +
+      'Extract vocabulary items or full sentences/phrases from the image accurately. ' +
       'IMPORTANT RULES: ' +
-      '1. NEVER translate anything automatically! Only transcribe the exact words visible in the highlighted image. ' +
-      '2. Strip all separating punctuation such as dashes (-, –, —), colons (:), equals signs (=), arrows, or surrounding parentheses from the extracted words so both fields contain clean words only. ' +
-      '3. If the highlighted image contains BOTH the German word AND its Polish translation side by side (e.g. "der Hund - pies", "der Hund: pies", "laufen biegnąć"), put the clean German part into "de", the clean Polish part into "pl", and set "bilingual": true. ' +
-      '4. If the highlighted image contains ONLY ONE language (e.g. only the German word without Polish translation), put the clean extracted word into "de" (or "pl" if Polish), leave the other field completely empty "", and set "bilingual": false. ' +
+      '1. NEVER translate anything automatically! Only transcribe the exact text visible in the highlighted image. ' +
+      '2. Strip only separating punctuation between German and Polish (such as outer dashes -, –, —, colons :, equals signs =, arrows, bullet points •, or surrounding parentheses), while keeping full multi-word phrases and multi-line sentences intact (for example, if a German sentence wraps across two lines like "Um 11 Uhr fange ich an, das Mittagessen" + "zu kochen.", join them into ONE single German sentence "Um 11 Uhr fange ich an, das Mittagessen zu kochen" paired with its Polish translation). NEVER split a wrapped German sentence into two flashcards! ' +
+      '3. When an entry has multiple German forms separated by dashes (for example singular and plural: "der Lehrling - die Lehrlinge - uczeń" or "der Rabatt - die Rabatte - rabat, zniżka"), keep ALL German forms together in "de" (e.g. "der Lehrling – die Lehrlinge") and put ONLY the Polish translation in "pl" (e.g. "uczeń" or "rabat, zniżka"). NEVER put the German plural form into "pl"! ' +
+      '4. If the highlighted image contains BOTH German and Polish text (whether single words, multiple words, or an X-word German sentence and its X-word Polish translation), put the clean German part into "de", the clean Polish part into "pl", and set "bilingual": true. ' +
+      '5. If the highlighted image contains ONLY ONE language (e.g. 1 or 2 German words or a German sentence without Polish translation), put the clean extracted text into "de" (or "pl" if only Polish), leave the other field completely empty "", and set "bilingual": false. ' +
       'Reply ONLY with JSON: {"items": [{"de": string, "pl": string, "bilingual": boolean}]}',
       { images: blob, modelTier: 'quick' }
     );
     if (r && Array.isArray(r.items) && r.items.length) {
       return r.items.map(it => {
-        const de = cleanVocabTerm(it.de);
-        const pl = cleanVocabTerm(it.pl);
+        let de = cleanVocabTerm(it.de);
+        let pl = cleanVocabTerm(it.pl);
+        if (de && pl) {
+          // Jeśli w polu "pl" nadal znalazła się druga forma niemiecka (np. "die Lehrlinge — uczeń"), przenieś ją do "de"
+          const plSub = pl.split(/\s+[-–—=:→]\s+|\s*->\s*/).map(x => cleanVocabTerm(x)).filter(Boolean);
+          if (plSub.length >= 2) {
+            const firstSubSide = classifyPhraseSide(plSub[0], 'de');
+            if (firstSubSide === 'de' && classifyPhraseSide(de, 'de') === 'de') {
+              de = de + ' – ' + plSub[0];
+              pl = plSub.slice(1).join(' – ');
+            }
+          }
+          const deSide = classifyPhraseSide(de, 'de');
+          const plSide = classifyPhraseSide(pl, 'pl');
+          if (deSide === 'pl' && plSide === 'de') {
+            const tmp = de;
+            de = pl;
+            pl = tmp;
+          }
+        }
         return {
           de,
           pl,
@@ -409,25 +583,7 @@ async function recognizeAndParseCanvas(canvas, langHint, onProgress) {
     }
   });
   const rawText = (result && result.data && result.data.text) ? result.data.text : '';
-  const lines = rawText.split(/\r?\n/).map(l => l.replace(/[ \t]+/g, ' ').trim()).filter(Boolean);
-  const items = [];
-
-  for (const line of lines) {
-    const pair = splitBilingualLine(line, defaultDir);
-    if (pair) {
-      items.push(pair);
-    } else {
-      const cleanSingle = cleanVocabTerm(line);
-      if (cleanSingle) {
-        items.push({
-          de: defaultDir === 'de-pl' ? cleanSingle : '',
-          pl: defaultDir === 'pl-de' ? cleanSingle : '',
-          bilingual: false
-        });
-      }
-    }
-  }
-  return items;
+  return splitRecognizedLinesIntoItems(rawText, defaultDir);
 }
 
 function cropRectToCanvas(sourceCanvas, rect) {
